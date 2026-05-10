@@ -24,4 +24,4 @@ A fully decentralized voting system built on Solana.
 [View Program on Solana Explorer](https://explorer.solana.com/address/E8QxP2dT17SkxmP1ZQ4qJastqPjayoYGNpqVLE8krMNt?cluster=devnet)
 
 ## 👤 Author
-Made with ❤️ by [Your Name]
+Made with ❤️ by [Muhammad Abdullah]
