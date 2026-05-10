@@ -3,7 +3,7 @@ import { PublicKey } from "@solana/web3.js";
 export const programId = new PublicKey("E8QxP2dT17SkxmP1ZQ4qJastqPjayoYGNpqVLE8krMNt");
 
 export const rpcList = [
-  "https://devnet.helius-rpc.com/?api-key=09f1733a-379e-4935-babb-8b674ebae5d8gi",
+  "https://mainnet.helius-rpc.com/?api-key=09f1733a-379e-4935-babb-8b674ebae5d8",
   "https://api.devnet.solana.com",
 ];
 
