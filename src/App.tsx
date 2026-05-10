@@ -7,6 +7,7 @@ import { parsePoll, parseCandidate } from "./utils/persers";
 import ToastContainer, { toast } from "./components/ToastContainer";
 import Navbar from "./components/Navbar";
 import HomePage from "./pages/HomePage";
+import { SEED_VOTE } from "./utils/constants";
 import PollList from "./pages/PollList";
 import PollDetailPage from "./pages/PollDetailPage";
 import CreatePollPage from "./pages/CreatePollPage";
@@ -31,7 +32,7 @@ function App() {
   const [votedPollIds, setVotedPollIds] = useState<number[]>([]);
   const [selectedPoll, setSelectedPoll] = useState<PollData | null>(null);
   const [candidates, setCandidates] = useState<CandidateData[]>([]);
-  const [myVoteRecordForPoll] = useState<VoteRecordData | null>(null);
+  const [myVoteRecordForPoll, setMyVoteRecordForPoll] = useState<VoteRecordData | null>(null);
   const [isApproved, setIsApproved] = useState(false);
   const [newPollName, setNewPollName] = useState("");
   const [newPollDesc, setNewPollDesc] = useState("");
@@ -195,11 +196,166 @@ function App() {
   };
 
   // ---- Handlers ----
-  const handleCreatePoll = async () => { /* ... same logic ... */ };
-  const handleAddOption = async () => { /* ... updated logic with immediate refetch ... */ };
-  const handleAddApprovedVoter = async () => { /* ... same ... */ };
-  const handleVote = async (candidateId: number) => { /* ... same, plus fetchVotedPollIds call ... */ };
-  const handleDeletePoll = async () => { /* ... same ... */ };
+  const handleCreatePoll = async () => {
+    if (!publicKey) return;
+    const pollId = Date.now();
+    const start = newPollStart ? Math.floor(new Date(newPollStart).getTime() / 1000) : Math.floor(Date.now() / 1000);
+    const end = newPollEnd ? Math.floor(new Date(newPollEnd).getTime() / 1000) : start + 86400;
+    const [pollPda] = await PublicKey.findProgramAddress([toLEBytes(pollId, 8)], programId);
+    const registryPda = await getRegistryPda();
+    const data = await buildInstructionData("initialize_poll", {
+      poll_id: pollId, name: newPollName, description: newPollDesc,
+      start_time: start, end_time: end,
+    }, { poll_id: 'u64', name: 'string', description: 'string', start_time: 'i64', end_time: 'i64' });
+    try {
+      await sendTx(new TransactionInstruction({
+        keys: [
+          { pubkey: pollPda, isSigner: false, isWritable: true },
+          { pubkey: registryPda, isSigner: false, isWritable: true },
+          { pubkey: publicKey, isSigner: true, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+        ], programId, data: data as any,
+      }));
+      toast('success', 'Poll created!');
+      fetchPollIds();
+      setTimeout(() => setPage("activePolls"), 300);
+      getBalance(publicKey);
+    } catch (e: any) { toast('error', e.message); }
+  };
+  const handleAddOption = async () => {
+  if (!publicKey || !selectedPoll) return;
+  const cid = Date.now();
+  const [candidatePda] = await PublicKey.findProgramAddress(
+    [toLEBytes(selectedPoll.pollId, 8), toLEBytes(cid, 8)], programId
+  );
+  const data = await buildInstructionData("add_candidate", {
+    poll_id: selectedPoll.pollId, candidate_id: cid, name: newCandidateName,
+  }, { poll_id: 'u64', candidate_id: 'u64', name: 'string' });
+  try {
+    await sendTx(new TransactionInstruction({
+      keys: [
+        { pubkey: selectedPoll.pubkey, isSigner: false, isWritable: true },
+        { pubkey: candidatePda, isSigner: false, isWritable: true },
+        { pubkey: publicKey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+      ], programId, data: data as any,
+    }));
+    toast('success', 'Option added');
+    setShowAddCandidate(false);
+    setNewCandidateName("");
+
+    // 🔥 Turant poll ka detail fetch karo
+    const [pollPda] = await PublicKey.findProgramAddress(
+      [toLEBytes(selectedPoll.pollId, 8)], programId
+    );
+    for (const rpc of rpcList) {
+      try {
+        const conn = new Connection(rpc, "confirmed");
+        const acc = await conn.getAccountInfo(pollPda);
+        if (acc) {
+          const parsed = parsePoll(pollPda, { data: new Uint8Array(acc.data) });
+          if (parsed) {
+            setSelectedPoll(parsed);
+            await fetchCandidates(parsed);
+          }
+          break;
+        }
+      } catch (err) {}
+    }
+    getBalance(publicKey);
+  } catch (e: any) { toast('error', e.message); }
+};
+  const handleAddApprovedVoter = async () => {
+  if (!publicKey || !selectedPoll) return;
+  let voterPubkey: PublicKey;
+  try { voterPubkey = new PublicKey(newApprovedVoterAddr); }
+  catch { toast('error', 'Invalid wallet address'); return; }
+
+  const [avPda] = await PublicKey.findProgramAddress(
+    [SEED_VOTER, toLEBytes(selectedPoll.pollId, 8), voterPubkey.toBuffer()], programId
+  );
+
+  for (const rpc of rpcList) {
+    try {
+      const conn = new Connection(rpc, "confirmed");
+      const existing = await conn.getAccountInfo(avPda);
+      if (existing) { toast('info', 'Voter already added'); return; }
+      break;
+    } catch (err) {}
+  }
+
+  const data = await buildInstructionData("add_approved_voter", {
+    poll_id: selectedPoll.pollId, voter: voterPubkey.toBase58(),
+  }, { poll_id: 'u64', voter: 'pubkey' });
+
+  try {
+    await sendTx(new TransactionInstruction({
+      keys: [
+        { pubkey: selectedPoll.pubkey, isSigner: false, isWritable: true },
+        { pubkey: avPda, isSigner: false, isWritable: true },
+        { pubkey: publicKey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+      ], programId, data: data as any,
+    }));
+    toast('success', 'Approved voter added');
+    setShowAddApprovedVoter(false);
+    fetchPolls();
+    checkApproved(selectedPoll.pollId);
+    getBalance(publicKey);
+  } catch (e: any) { toast('error', e.message); }
+};
+  const handleVote = async (candidateId: number) => {
+  if (!publicKey || !selectedPoll) return;
+  if (myVoteRecordForPoll) { toast('info', 'Vote already casted'); return; }
+
+  const [votePda] = await PublicKey.findProgramAddress(
+    [SEED_VOTE, selectedPoll.pubkey.toBuffer(), publicKey.toBuffer()], programId
+  );
+  const [avPda] = await PublicKey.findProgramAddress(
+    [SEED_VOTER, toLEBytes(selectedPoll.pollId, 8), publicKey.toBuffer()], programId
+  );
+  const voterRegistryPda = await getVoterRegistryPda(publicKey);
+
+  const data = await buildInstructionData("cast_vote", {
+    poll_id: selectedPoll.pollId, candidate_id: candidateId,
+  }, { poll_id: 'u64', candidate_id: 'u64' });
+  try {
+    await sendTx(new TransactionInstruction({
+      keys: [
+        { pubkey: selectedPoll.pubkey, isSigner: false, isWritable: true },
+        { pubkey: candidates.find(c => c.candidateId === candidateId)!.pubkey, isSigner: false, isWritable: true },
+        { pubkey: votePda, isSigner: false, isWritable: true },
+        { pubkey: avPda, isSigner: false, isWritable: false },
+        { pubkey: voterRegistryPda, isSigner: false, isWritable: true },
+        { pubkey: publicKey, isSigner: true, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+      ], programId, data: data as any,
+    }));
+    toast('success', 'Vote cast!');
+    fetchCandidates(selectedPoll);
+    fetchVotedPollIds();
+    setMyVoteRecordForPoll({ pubkey: votePda, voter: publicKey, pollId: selectedPoll.pollId, candidateId });
+    getBalance(publicKey);
+  } catch (e: any) { toast('error', e.message); }
+};
+  const handleDeletePoll = async () => {
+  if (!publicKey || !selectedPoll) return;
+  const registryPda = await getRegistryPda();
+  const data = await buildInstructionData("delete_poll", { poll_id: selectedPoll.pollId }, { poll_id: 'u64' });
+  try {
+    await sendTx(new TransactionInstruction({
+      keys: [
+        { pubkey: selectedPoll.pubkey, isSigner: false, isWritable: true },
+        { pubkey: registryPda, isSigner: false, isWritable: true },
+        { pubkey: publicKey, isSigner: true, isWritable: true },
+      ], programId, data: data as any,
+    }));
+    toast('success', 'Poll deleted');
+    fetchPollIds();
+    setPage("home");
+    getBalance(publicKey);
+  } catch (e: any) { toast('error', e.message); }
+};
 
   const now = Math.floor(Date.now() / 1000);
   const activePolls = polls.filter(p => now >= p.startTime && now <= p.endTime);
